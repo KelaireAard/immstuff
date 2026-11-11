@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin name="Kelaire_Note_Reader" author="Kelaire" id="0cf246fcf9dde6c3196a807b"
+ language="Lua" purpose="Selectable, scrollable Aardwolf notes in a themed miniwindow"
+ requires="5.07" version="2.2" save_state="y" />
+<aliases>
+ <alias match="^note (read(?:\s+(?:last|\d+))?|ran)$" enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="90"><send>StartNoteCapture("%0")</send></alias>
+ <alias match="^notewin (show|hide|clear)$" enabled="y" regexp="y" ignore_case="y" send_to="12" sequence="90"><send>NoteWindowCommand("%1")</send></alias>
+</aliases>
+<triggers>
+ <trigger enabled="y" regexp="y" match="^\s*~{20,}\s*$" script="NoteDivider" sequence="90" />
+ <trigger enabled="y" regexp="y" match="^(.*)$" script="NoteLine" sequence="999" />
+</triggers>
+<script><![CDATA[
+require "themed_miniwindows"
+local WINDOW_ID = GetPluginID()
+local capturing = false
+local divider_count = 0
+local note_lines = {}
+local my_window = nil
+
+function StartNoteCapture(command)
+  capturing = true
+  divider_count = 0
+  note_lines = {}
+  Send(command)
+end
+
+function NoteDivider(name, line, wildcards)
+  if not capturing then return end
+  divider_count = divider_count + 1
+  if divider_count == 3 then
+    capturing = false
+    ShowCapturedNote()
+  end
+end
+
+function NoteLine(name, line, wildcards)
+  if capturing and divider_count >= 1 and divider_count < 3 then
+    -- The divider trigger runs first, so discard separator lines.
+    if not line:match("^%s*~+%s*$") then
+      table.insert(note_lines, line)
+    end
+  end
+end
+
+function ShowCapturedNote()
+  if my_window and my_window.id then my_window:delete() end
+  my_window = ThemedTextWindow(
+    WINDOW_ID, 80, 60, 740, 510, "Aardwolf Note Reader",
+    "center", true, true, true, true, true, false, true,
+    nil, nil, GetAlphaOption("output_font_name"),
+    GetOption("output_font_height"), nil, nil, true
+  )
+  for _, line in ipairs(note_lines) do
+    my_window:add_text(ColoursToStyles(line), false)
+  end
+  -- text_rect.lua dispatches right clicks to textrect:rightClickMenu().
+  -- Override this instance only, leaving the shared library unchanged.
+  local function copy_note_with_colours()
+    local tr = my_window.textrect
+    local selected = tr.copy_start_line ~= nil and tr.copy_end_line ~= nil
+    local content = selected and tr:selected_text(true) or tr:getText()
+    SetClipboard(content)
+    ColourNote("yellow", "", selected and
+      "Selected note text copied with colours." or
+      "Entire note copied with colours.")
+  end
+  my_window.textrect.rightClickMenu = function(self, hotspot_id)
+    copy_note_with_colours()
+  end
+  -- Also suppress the standard window menu outside the text rectangle.
+  my_window.right_click_menu = function(self, hotspot_id)
+    copy_note_with_colours()
+  end
+  my_window:set_scroll(1)
+  my_window:show()
+  my_window:bring_to_front()
+end
+
+function NoteWindowCommand(action)
+  action = (action or ""):lower()
+  if action == "hide" then
+    if my_window and my_window.id then my_window:hide() end
+  elseif action == "show" then
+    if my_window and my_window.id then
+      my_window:show()
+      my_window:bring_to_front()
+    elseif #note_lines > 0 then
+      ShowCapturedNote()
+    end
+  elseif action == "clear" then
+    note_lines = {}
+    capturing = false
+    divider_count = 0
+    if my_window and my_window.id then my_window:delete(); my_window = nil end
+  end
+end
+
+function OnPluginDisable()
+  capturing = false
+  if my_window and my_window.id then my_window:hide() end
+end
+function OnPluginClose()
+  if my_window and my_window.id then my_window:delete() end
+end
+]]></script>
+</muclient>

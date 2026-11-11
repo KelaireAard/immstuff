@@ -8,7 +8,7 @@
    language="Lua"
    purpose="Miniwindow editor for short and long descriptions, keywords, area, owner, and item name"
    requires="4.70"
-   version="1.46"
+   version="1.50"
    >
 </plugin>
 <aliases>
@@ -19,6 +19,8 @@
   <trigger enabled="y" regexp="y" ignore_case="y" match="^.*area is not a valid area keyword.*$" script="TPAreaInvalid" sequence="100" />
   <trigger enabled="y" regexp="y" ignore_case="y" match="^\s*O\)\s*Area Flags\s*:\s*(.*?)\s*$" script="TPAreaFlags" sequence="100" />
   <trigger enabled="y" regexp="y" ignore_case="y" match="^\s*I\)\s*First room\s*:\s*([^\s(]+)" script="TPFirstRoom" sequence="100" />
+  <trigger enabled="y" regexp="y" match="^You do not have that item\.$" script="TPRestringMissing" sequence="100" />
+  <trigger enabled="y" regexp="y" match="^\+-----------------------------------------------------------------\+\s*$" script="TPRestringFound" sequence="100" />
 </triggers>
 <script><![CDATA[
 local win = GetPluginID() .. '_window'
@@ -46,6 +48,7 @@ local pending_area = nil
 local area_flags_ok = false
 local first_room = nil
 local submission = nil
+local pending_restring = nil
 
 local function strip_keyword_colours(value)
   -- Preserve literal @@ while removing Aardwolf colour sequences.
@@ -95,6 +98,7 @@ local function validate_length(f)
 end
 
 local draw
+local clear_pending
 local function set_field(f, value)
   -- Remove leading spaces and leading @w reset codes from pasted or typed values.
   -- Preserve internal spaces, other colour codes, and trailing content.
@@ -107,6 +111,7 @@ local function set_field(f, value)
   if f.key == 'keywords' then
     value = strip_keyword_colours(value)
   end
+  if trivia_portal and f.key == 'item' then return end
   f.value = value
   validate_length(f)
   draw()
@@ -175,26 +180,48 @@ draw = function()
   WindowRectOp(win, 2, 398, button_y, width-12, button_y+29, accent)
   WindowText(win, 'label', 'SUBMIT', 425, button_y+7, 505, button_y+27, 0x101010)
   WindowAddHotspot(win, 'submit', 398, button_y, width-12, button_y+29, '', '', '', '', 'SubmitClick', 'Submit editor values', 1, 0)
+  WindowRectOp(win, 2, 12, button_y, 112, button_y+29, 0x707070)
+  WindowText(win, 'label', 'CLEAR', 39, button_y+7, 105, button_y+27, white)
+  WindowAddHotspot(win, 'clear', 12, button_y, 112, button_y+29, '', '', '', '', 'ClearClick', 'Clear all fields', 1, 0)
   WindowShow(win, visible)
 end
 
 function TriviaToggle(flags, hotspot)
+  if pending_restring then
+    pending_restring = nil
+    ColourNote('yellow', '', 'TP Editor: Pending restring cancelled by mode change.')
+  end
   trivia_portal = not trivia_portal
   if trivia_portal then
     for _, f in ipairs(fields) do
-      if f.key == "item" and f.value == "" then
-        f.value = "trivia"
-        break
-      end
+      if f.key == 'item' then f.value = 'trivia'; break end
     end
   end
   draw()
+end
+
+function ClearClick(flags, hotspot)
+  pending_restring = nil
+  pending_area = nil
+  area_flags_ok = false
+  first_room = nil
+  submission = nil
+  for _, f in ipairs(fields) do f.value = '' end
+  -- Keep the checkbox setting; a checked portal always has a fixed item name.
+  if trivia_portal then
+    for _, f in ipairs(fields) do
+      if f.key == 'item' then f.value = 'trivia'; break end
+    end
+  end
+  draw()
+  ColourNote('lightgreen', '', 'TP Editor: Fields cleared.')
 end
 
 function FieldClick(flags, hotspot)
   local index = tonumber(hotspot:match('field(%d+)'))
   if not index then return end
   local f = fields[index]
+  if trivia_portal and f.key == 'item' then return end
   -- MUSHclient hotspot flags: 0x20 = right mouse, 0x10 = left mouse.
   -- Right-click replaces the field with the clipboard text immediately.
   if bit.band(flags, 0x20) ~= 0 then
@@ -244,7 +271,7 @@ local function quote_description(value, label)
   return delimiter .. value .. delimiter
 end
 
-local function clear_pending()
+clear_pending = function()
   pending_area = nil
   area_flags_ok = false
   first_room = nil
@@ -271,6 +298,10 @@ local function finish_portal()
 end
 
 function SubmitClick()
+  if pending_restring then
+    ColourNote('yellow', '', 'TP Editor: Waiting for the item identification result. No commands sent yet.')
+    return
+  end
   if pending_area then
     ColourNote('yellow', '', 'TP Editor: An area validation is already in progress.')
     return
@@ -284,7 +315,38 @@ function SubmitClick()
     return
   end
   if not trivia_portal then
-    print_submission()
+    -- Restring an existing item: only send commands for populated fields.
+    local item = field_value('item'):match('^%s*(.-)%s*$')
+    if item == '' or not item:match('^[%w_%-]+$') then
+      ColourNote('red', '', 'TP Editor ERROR: Enter a valid Item Name (one keyword) to restring.')
+      return
+    end
+
+    local commands = {}
+    local short = field_value('short')
+    local long = field_value('long')
+    local keywords = field_value('keywords')
+    if short:match('%S') then
+      local quoted = quote_description(short, 'Short Description')
+      if not quoted then return end
+      table.insert(commands, 'ostring ' .. item .. ' short ' .. quoted)
+    end
+    if long:match('%S') then
+      local quoted = quote_description(long, 'Long Description')
+      if not quoted then return end
+      table.insert(commands, 'ostring ' .. item .. ' long ' .. quoted)
+    end
+    if keywords:match('%S') then
+      table.insert(commands, 'ostring ' .. item .. ' keywords ' .. quote_mud(keywords))
+    end
+    if #commands == 0 then
+      ColourNote('yellow', '', 'TP Editor: Fill in at least one description or keywords field to restring.')
+      return
+    end
+    -- Do not restring until the ID response confirms that the item is present.
+    pending_restring = {item = item, commands = commands}
+    ColourNote('cyan', '', 'TP Editor: Checking inventory with id ' .. item .. '...')
+    Send('id ' .. item)
     return
   end
 
@@ -320,6 +382,24 @@ function SubmitClick()
   first_room = nil
   ColourNote('cyan', '', 'TP Editor: Checking area ' .. area .. ' with zstat...')
   Send('zstat ' .. area)
+end
+
+-- ID output is asynchronous. Only an explicit item-information banner authorizes
+-- sending the commands captured at submission time.
+function TPRestringFound(name, line, wildcards)
+  if not pending_restring then return end
+  local job = pending_restring
+  pending_restring = nil
+  for _, command in ipairs(job.commands) do Send(command) end
+  ColourNote('lightgreen', '', 'TP Editor: Item found. Sent ' .. #job.commands ..
+    ' restring command(s) for ' .. job.item .. '.')
+end
+
+function TPRestringMissing(name, line, wildcards)
+  if not pending_restring then return end
+  local item = pending_restring.item
+  pending_restring = nil
+  ColourNote('red', '', 'TP Editor: You do not have ' .. item .. '. Restring cancelled; no ostring commands sent.')
 end
 
 function TPAreaInvalid(name, line, wildcards)
@@ -389,7 +469,7 @@ function OnPluginInstall()
   ShowTPEdit()
   ColourNote('lightgreen', '', 'Description Editor loaded. Use tpedit show / tpedit hide.')
 end
-function OnPluginClose() clear_pending(); HideTPEdit() end
-function OnPluginDisable() clear_pending(); HideTPEdit() end
+function OnPluginClose() pending_restring = nil; clear_pending(); HideTPEdit() end
+function OnPluginDisable() pending_restring = nil; clear_pending(); HideTPEdit() end
 ]]></script>
 </muclient>
