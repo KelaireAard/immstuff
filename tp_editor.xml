@@ -1,0 +1,395 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE muclient>
+<muclient>
+<plugin
+   name="TP_Description_Editor"
+   author="Kelaire"
+   id="5afc98747e77fdb702e021cd"
+   language="Lua"
+   purpose="Miniwindow editor for short and long descriptions, keywords, area, owner, and item name"
+   requires="4.70"
+   version="1.46"
+   >
+</plugin>
+<aliases>
+  <alias match="tpedit show" enabled="y" send_to="12" sequence="100"><send>ShowTPEdit()</send></alias>
+  <alias match="tpedit hide" enabled="y" send_to="12" sequence="100"><send>HideTPEdit()</send></alias>
+</aliases>
+<triggers>
+  <trigger enabled="y" regexp="y" ignore_case="y" match="^.*area is not a valid area keyword.*$" script="TPAreaInvalid" sequence="100" />
+  <trigger enabled="y" regexp="y" ignore_case="y" match="^\s*O\)\s*Area Flags\s*:\s*(.*?)\s*$" script="TPAreaFlags" sequence="100" />
+  <trigger enabled="y" regexp="y" ignore_case="y" match="^\s*I\)\s*First room\s*:\s*([^\s(]+)" script="TPFirstRoom" sequence="100" />
+</triggers>
+<script><![CDATA[
+local win = GetPluginID() .. '_window'
+local width = 530
+local height = 323  -- Updated dynamically when Trivia Portal is toggled
+local bg, panel, border = 0x202020, 0x303030, 0x707070
+local white, muted, accent = 0xFFFFFF, 0xBBBBBB, 0x44BB88
+local fields = {
+  {key='short', label='Short Description', value=''},
+  {key='long', label='Long Description', value=''},
+  {key='keywords', label='Keywords', value=''},
+  {key='item', label='Item Name', value=''},
+  {key='owner', label='Owner', value=''},
+  {key='area', label='Area Name', value=''},
+}
+local trivia_portal = false
+local function field_value(key)
+  for _, f in ipairs(fields) do
+    if f.key == key then return f.value end
+  end
+  return ''
+end
+local visible = false
+local pending_area = nil
+local area_flags_ok = false
+local first_room = nil
+local submission = nil
+
+local function strip_keyword_colours(value)
+  -- Preserve literal @@ while removing Aardwolf colour sequences.
+  local marker = string.char(1)
+  local plain = (value or ''):gsub('@@', marker)
+  plain = plain:gsub('@x%d%d%d', ''):gsub('@[A-Za-z]', '')
+  return (plain:gsub(marker, '@'))
+end
+
+local function normalize_keywords(value)
+  local words = {}
+  for word in strip_keyword_colours(value):lower():gmatch('%S+') do
+    if word ~= 'trivia' and word ~= 'portal' then
+      table.insert(words, word)
+    end
+  end
+  return 'trivia portal' .. (#words > 0 and (' ' .. table.concat(words, ' ')) or '')
+end
+
+local function display_length(value)
+  -- Aardwolf colour codes: @xNNN (256-colour) and @R, @w, etc.
+  -- A doubled @@ is a literal @ and should count as one character.
+  local placeholder = string.char(1)
+  local plain = (value or ''):gsub('@@', placeholder)
+  plain = plain:gsub('@x%d%d%d', ''):gsub('@[A-Za-z]', '')
+  -- Count UTF-8 codepoints, rather than bytes, for visible characters.
+  local _, continuation_bytes = plain:gsub('[\128-\191]', '')
+  return #plain - continuation_bytes
+end
+
+local function validate_length(f)
+  if f.key == 'short' then
+    local visible_count = display_length(f.value)
+    if visible_count > 40 then
+      ColourNote('red', '', 'TP Editor ERROR: Short Description has ' .. visible_count ..
+        ' displayable characters (maximum 40; ' .. (visible_count - 40) .. ' over). Colour codes are ignored.')
+      return false
+    end
+    return true
+  end
+  if f.key == 'long' and #f.value > 80 then
+    ColourNote('yellow', '', 'TP Editor WARNING: Long Description is ' .. #f.value ..
+      ' characters; maximum is 80 (' .. (#f.value - 80) .. ' over).')
+    return false
+  end
+  return true
+end
+
+local draw
+local function set_field(f, value)
+  -- Remove leading spaces and leading @w reset codes from pasted or typed values.
+  -- Preserve internal spaces, other colour codes, and trailing content.
+  value = value or ''
+  while true do
+    local cleaned = value:gsub('^%s+', ''):gsub('^@w', '')
+    if cleaned == value then break end
+    value = cleaned
+  end
+  if f.key == 'keywords' then
+    value = strip_keyword_colours(value)
+  end
+  f.value = value
+  validate_length(f)
+  draw()
+end
+local drag_offset_x, drag_offset_y = 0, 0
+local x = tonumber(GetVariable('tpedit_x')) or 50
+local y = tonumber(GetVariable('tpedit_y')) or 50
+
+draw = function()
+  -- Fit the miniwindow to the visible fields and submit button.
+  height = trivia_portal and 415 or 323
+  -- Keep the current screen position when a field is edited.
+  if WindowInfo(win, 1) ~= nil then
+    x = tonumber(WindowInfo(win, 10)) or x
+    y = tonumber(WindowInfo(win, 11)) or y
+  end
+  WindowCreate(win, x, y, width, height, 4, 2, bg)
+  WindowFont(win, 'heading', 'Arial', 12, true, false, false, false)
+  WindowFont(win, 'body', 'Consolas', 10, false, false, false, false)
+  WindowFont(win, 'label', 'Arial', 9, true, false, false, false)
+  WindowRectOp(win, 2, 0, 0, width, 34, 0x383838)
+  WindowText(win, 'heading', 'Description Editor', 12, 7, width-35, 30, white)
+  WindowAddHotspot(win, 'drag', 0, 0, width-30, 34, '', '', 'DragStart', '', '', 'Drag window', 10, 0)
+  WindowDragHandler(win, 'drag', 'DragMove', 'DragRelease', 0)
+  WindowText(win, 'label', 'X', width-23, 8, width-5, 28, white)
+  WindowAddHotspot(win, 'close', width-30, 0, width, 34, '', '', '', '', 'CloseClick', 'Close window', 1, 0)
+  local row_y = 48
+  for i, f in ipairs(fields) do
+    if f.key == 'owner' or f.key == 'area' then
+      if trivia_portal then
+        f.y = row_y
+        row_y = row_y + 46
+      else
+        f.y = nil
+      end
+    else
+      f.y = row_y
+      row_y = row_y + 46
+    end
+    if f.key == 'item' then
+      -- The checkbox is always between Item Name and Owner / Area Name.
+      -- Its position is drawn after all fields below.
+      row_y = row_y + 36
+    end
+    if f.y then
+      WindowText(win, 'label', f.label, 12, f.y, width-12, f.y+20, muted)
+      local top, bottom = f.y+17, f.y+38
+      WindowRectOp(win, 2, 12, top, width-12, bottom, border)
+      WindowRectOp(win, 2, 13, top+1, width-13, bottom-1, panel)
+      local shown = (f.key == 'keywords' and trivia_portal and normalize_keywords(f.value) or f.value):gsub('\r',''):gsub('\n',' / ')
+      if shown == '' then shown = '(click to edit)' end
+      if #shown > 60 then shown = shown:sub(1, 57) .. '...' end
+      WindowText(win, 'body', shown, 19, top+3, width-18, bottom-2, f.value == '' and muted or white)
+      WindowAddHotspot(win, 'field'..i, 12, top, width-12, bottom, '', '', '', '', 'FieldClick', 'Left-click: edit | Right-click: paste clipboard into '..f.label, 1, 0)
+    end
+  end
+  local checkbox_y = 48 + 4*46 + 4
+  WindowRectOp(win, 2, 12, checkbox_y, 30, checkbox_y+18, border)
+  WindowRectOp(win, 2, 14, checkbox_y+2, 28, checkbox_y+16, panel)
+  if trivia_portal then
+    WindowText(win, 'label', 'X', 17, checkbox_y+1, 29, checkbox_y+17, accent)
+  end
+  WindowText(win, 'label', 'Trivia Portal', 39, checkbox_y, 190, checkbox_y+22, white)
+  WindowAddHotspot(win, 'trivia_toggle', 12, checkbox_y-2, 190, checkbox_y+23, '', '', '', '', 'TriviaToggle', 'Toggle Trivia Portal', 1, 0)
+  local button_y = trivia_portal and 373 or 281
+  WindowRectOp(win, 2, 398, button_y, width-12, button_y+29, accent)
+  WindowText(win, 'label', 'SUBMIT', 425, button_y+7, 505, button_y+27, 0x101010)
+  WindowAddHotspot(win, 'submit', 398, button_y, width-12, button_y+29, '', '', '', '', 'SubmitClick', 'Submit editor values', 1, 0)
+  WindowShow(win, visible)
+end
+
+function TriviaToggle(flags, hotspot)
+  trivia_portal = not trivia_portal
+  if trivia_portal then
+    for _, f in ipairs(fields) do
+      if f.key == "item" and f.value == "" then
+        f.value = "trivia"
+        break
+      end
+    end
+  end
+  draw()
+end
+
+function FieldClick(flags, hotspot)
+  local index = tonumber(hotspot:match('field(%d+)'))
+  if not index then return end
+  local f = fields[index]
+  -- MUSHclient hotspot flags: 0x20 = right mouse, 0x10 = left mouse.
+  -- Right-click replaces the field with the clipboard text immediately.
+  if bit.band(flags, 0x20) ~= 0 then
+    local clipboard = GetClipboard()
+    if clipboard and clipboard ~= '' then
+      set_field(f, clipboard)
+    else
+      ColourNote('yellow', '', 'TP Editor: Clipboard is empty; '..f.label..' was not changed.')
+    end
+    return
+  end
+  if bit.band(flags, 0x10) ~= 0 then
+    local response = utils.inputbox('Enter '..f.label..':', 'Description Editor', f.value)
+    if response ~= nil then set_field(f, response) end
+  end
+end
+
+local function print_submission()
+  ColourNote('white', 'navy', '--- Description Editor ---')
+  for _, f in ipairs(fields) do
+    if trivia_portal or (f.key ~= 'owner' and f.key ~= 'area') then ColourNote('lightgreen', '', f.label .. ':') end
+    local value = (f.key == 'keywords' and trivia_portal) and normalize_keywords(f.value) or f.value
+    if trivia_portal or (f.key ~= 'owner' and f.key ~= 'area') then
+      ColourNote('white', '', value ~= '' and value or '(empty)')
+    end
+  end
+  ColourNote('white', 'navy', '--------------------------')
+end
+
+local function quote_mud(value)
+  -- Never allow pasted line breaks to become additional MUD commands.
+  return '"' .. (value or ''):gsub('[\r\n]+', ' '):gsub('"', '\\"') .. '"'
+end
+
+local function quote_description(value, label)
+  value = (value or ''):gsub('[\r\n]+', ' ')
+  -- Append the reset code inside the quoted description, without duplicating it.
+  if not value:match('@w%s*$') then value = value .. '@w' end
+  local has_double = value:find('"', 1, true) ~= nil
+  local has_single = value:find("'", 1, true) ~= nil
+  if has_double and has_single then
+    ColourNote('red', '', 'TP Editor ERROR: ' .. label ..
+      ' contains both single and double quotes. Remove one quote type before submitting.')
+    return nil
+  end
+  local delimiter = has_double and "'" or '"'
+  return delimiter .. value .. delimiter
+end
+
+local function clear_pending()
+  pending_area = nil
+  area_flags_ok = false
+  first_room = nil
+  submission = nil
+end
+
+local function finish_portal()
+  if not pending_area or not area_flags_ok or not first_room or not submission then return end
+  local data = submission
+  local room = first_room
+  clear_pending()
+
+  -- The area has been checked before creating anything.
+  ColourNote('lightgreen', '', 'TP Editor: Area validated. First room: ' .. room)
+  Send('oload badtrip-9')
+  Send('ostring ' .. data.item .. ' short ' .. data.short_command)
+  Send('ostring ' .. data.item .. ' long ' .. data.long_command)
+  Send('ostring ' .. data.item .. ' keywords ' .. quote_mud(data.keywords))
+  Send('ostring ' .. data.item .. ' owner ' .. quote_mud(data.owner))
+  Send('oset ' .. data.item .. ' destination ' .. quote_mud(room))
+  Send('id ' .. data.item)
+  Send('keep ' .. data.item)
+  ColourNote('lightgreen', '', 'TP Editor: Portal creation commands sent.')
+end
+
+function SubmitClick()
+  if pending_area then
+    ColourNote('yellow', '', 'TP Editor: An area validation is already in progress.')
+    return
+  end
+  local valid = true
+  for _, f in ipairs(fields) do
+    if not validate_length(f) then valid = false end
+  end
+  if not valid then
+    ColourNote('yellow', '', 'TP Editor: Please shorten the descriptions before submitting.')
+    return
+  end
+  if not trivia_portal then
+    print_submission()
+    return
+  end
+
+  local item = field_value('item'):match('^%s*(.-)%s*$')
+  if item == '' or not item:match('^[%w_%-]+$') then
+    ColourNote('red', '', 'TP Editor ERROR: Item Name must be a single item keyword (letters, numbers, underscore, or hyphen).')
+    return
+  end
+  local owner = field_value('owner'):match('^%s*(.-)%s*$')
+  local area = field_value('area'):match('^%s*(.-)%s*$')
+  if owner == '' or owner:find('[\r\n]') then
+    ColourNote('red', '', 'TP Editor ERROR: Owner is required and must be one line.')
+    return
+  end
+  if area == '' or area:find('[\r\n]') then
+    ColourNote('red', '', 'TP Editor ERROR: Enter a valid, single-line area keyword.')
+    return
+  end
+
+  local short_command = quote_description(field_value('short'), 'Short Description')
+  local long_command = quote_description(field_value('long'), 'Long Description')
+  if not short_command or not long_command then return end
+
+  submission = {
+    item = item,
+    short_command = short_command,
+    long_command = long_command,
+    keywords = normalize_keywords(field_value('keywords')),
+    owner = owner,
+  }
+  pending_area = area
+  area_flags_ok = false
+  first_room = nil
+  ColourNote('cyan', '', 'TP Editor: Checking area ' .. area .. ' with zstat...')
+  Send('zstat ' .. area)
+end
+
+function TPAreaInvalid(name, line, wildcards)
+  if not pending_area then return end
+  local area = pending_area
+  clear_pending()
+  ColourNote('red', '', 'TP Editor ERROR: Area "' .. area .. '" is invalid (not a valid area keyword).')
+end
+
+function TPAreaFlags(name, line, wildcards)
+  if not pending_area then return end
+  local flags = (wildcards[1] or ''):lower()
+  local found = {}
+  for flag in flags:gmatch('[%w_%-]+') do found[flag] = true end
+  if found.noportals or found.epic then
+    local area = pending_area
+    local reasons = {}
+    if found.noportals then table.insert(reasons, 'noportals') end
+    if found.epic then table.insert(reasons, 'epic') end
+    clear_pending()
+    ColourNote('red', '', 'TP Editor ERROR: Portal cannot be created in area "' .. area ..
+      '" (restricted area flag: ' .. table.concat(reasons, ', ') .. ').')
+    return
+  end
+  area_flags_ok = true
+  finish_portal()
+end
+
+function TPFirstRoom(name, line, wildcards)
+  if not pending_area then return end
+  first_room = wildcards[1]
+  finish_portal()
+end
+
+function HideTPEdit()
+  visible = false
+  WindowShow(win, false)
+end
+function ShowTPEdit()
+  visible = true
+  draw()
+end
+function CloseClick(flags, hotspot)
+  HideTPEdit()
+end
+function DragStart(flags, hotspot)
+  -- Mouse position within the miniwindow when dragging begins.
+  drag_offset_x = tonumber(WindowInfo(win, 14)) or 0
+  drag_offset_y = tonumber(WindowInfo(win, 15)) or 0
+end
+function DragMove(flags, hotspot)
+  local mouse_x = tonumber(WindowInfo(win, 17))
+  local mouse_y = tonumber(WindowInfo(win, 18))
+  if not mouse_x or not mouse_y then return end
+  x = mouse_x - drag_offset_x
+  y = mouse_y - drag_offset_y
+  -- Reposition without recreating the miniwindow or deleting hotspots.
+  WindowPosition(win, x, y, 4, 2)
+end
+function DragRelease(flags, hotspot)
+  x = tonumber(WindowInfo(win, 10)) or x
+  y = tonumber(WindowInfo(win, 11)) or y
+  SetVariable('tpedit_x', tostring(x))
+  SetVariable('tpedit_y', tostring(y))
+end
+function OnPluginInstall()
+  ShowTPEdit()
+  ColourNote('lightgreen', '', 'Description Editor loaded. Use tpedit show / tpedit hide.')
+end
+function OnPluginClose() clear_pending(); HideTPEdit() end
+function OnPluginDisable() clear_pending(); HideTPEdit() end
+]]></script>
+</muclient>
