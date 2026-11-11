@@ -8,7 +8,7 @@
    language="Lua"
    purpose="Miniwindow editor for short and long descriptions, keywords, area, owner, and item name"
    requires="4.70"
-   version="1.50"
+   version="1.51"
    >
 </plugin>
 <aliases>
@@ -116,6 +116,20 @@ local function set_field(f, value)
   validate_length(f)
   draw()
 end
+-- Aardwolf miniwindow z-order manager (same plugin used by themed_miniwindows).
+local z_manager = '462b665ecb569efbf261422f'
+local z_registered = false
+local function bring_editor_to_front()
+  if WindowInfo(win, 1) == nil then return end
+  -- Register with the shared manager, then raise above other miniwindows.
+  -- Registration is only needed once per window lifetime.
+  if not z_registered then
+    local result = CallPlugin(z_manager, 'registerMiniwindow', win)
+    if result == 0 then z_registered = true end
+  end
+  CallPlugin(z_manager, 'boostMe', win)
+end
+
 local drag_offset_x, drag_offset_y = 0, 0
 local x = tonumber(GetVariable('tpedit_x')) or 50
 local y = tonumber(GetVariable('tpedit_y')) or 50
@@ -441,11 +455,13 @@ end
 function ShowTPEdit()
   visible = true
   draw()
+  bring_editor_to_front()
 end
 function CloseClick(flags, hotspot)
   HideTPEdit()
 end
 function DragStart(flags, hotspot)
+  bring_editor_to_front()
   -- Mouse position within the miniwindow when dragging begins.
   drag_offset_x = tonumber(WindowInfo(win, 14)) or 0
   drag_offset_y = tonumber(WindowInfo(win, 15)) or 0
