@@ -8,7 +8,7 @@
    language="Lua"
    purpose="Miniwindow editor for short and long descriptions, keywords, area, owner, and item name"
    requires="4.70"
-   version="1.51"
+   version="1.54"
    >
 </plugin>
 <aliases>
@@ -147,9 +147,11 @@ draw = function()
   WindowFont(win, 'body', 'Consolas', 10, false, false, false, false)
   WindowFont(win, 'label', 'Arial', 9, true, false, false, false)
   WindowRectOp(win, 2, 0, 0, width, 34, 0x383838)
-  WindowText(win, 'heading', 'Description Editor', 12, 7, width-35, 30, white)
-  WindowAddHotspot(win, 'drag', 0, 0, width-30, 34, '', '', 'DragStart', '', '', 'Drag window', 10, 0)
+  WindowText(win, 'heading', 'Description Editor', 12, 7, width-70, 30, white)
+  WindowAddHotspot(win, 'drag', 0, 0, width-60, 34, '', '', 'DragStart', '', '', 'Drag window', 10, 0)
   WindowDragHandler(win, 'drag', 'DragMove', 'DragRelease', 0)
+  WindowText(win, 'label', '?', width-52, 8, width-33, 28, white)
+  WindowAddHotspot(win, 'help', width-60, 0, width-30, 34, '', '', '', '', 'HelpClick', 'Open Description Editor help', 1, 0)
   WindowText(win, 'label', 'X', width-23, 8, width-5, 28, white)
   WindowAddHotspot(win, 'close', width-30, 0, width, 34, '', '', '', '', 'CloseClick', 'Close window', 1, 0)
   local row_y = 48
@@ -198,6 +200,84 @@ draw = function()
   WindowText(win, 'label', 'CLEAR', 39, button_y+7, 105, button_y+27, white)
   WindowAddHotspot(win, 'clear', 12, button_y, 112, button_y+29, '', '', '', '', 'ClearClick', 'Clear all fields', 1, 0)
   WindowShow(win, visible)
+end
+
+local help_win = GetPluginID() .. '_help'
+local help_window = nil
+local help_lines = {
+  '@C DESCRIPTION EDITOR - QUICK HELP@w',
+  '',
+  '@YBASICS@w',
+  'tpedit show / tpedit hide: show or hide the editor.',
+  'Left-click a field to type or edit its value.',
+  'Right-click to paste: clipboard text REPLACES the entire field.',
+  'An empty clipboard leaves the field unchanged.',
+  'SUBMIT runs the selected action; CLEAR resets the fields.',
+  '',
+  '@YTEXT AND COLOUR CODES@w',
+  'Leading spaces and leading @@w resets are removed on entry.',
+  'Other colour codes in descriptions are NOT stripped.',
+  'Descriptions retain internal colour codes such as @@R or @@x123.',
+  'A trailing @@w is added to submitted descriptions if missing.',
+  'Keywords are different: colour codes (@@xNNN and @@letter)',
+  'are stripped; doubled @@@@ is kept as a literal @@.',
+  'Newlines are changed to spaces when commands are sent.',
+  '',
+  '@YLIMITS@w',
+  'Short Description: maximum 40 visible characters; colour',
+  'codes do not count. Long Description: maximum 80 bytes,',
+  'including colour codes. Over-limit text blocks SUBMIT.',
+  'Descriptions cannot contain both single and double quotes.',
+  '',
+  '@YRESTRING AN ITEM (TRIVIA PORTAL OFF)@w',
+  'Enter an inventory item keyword in Item Name (one word).',
+  'Fill only the Short, Long and/or Keywords you want changed.',
+  'Blank fields are skipped, NOT erased on the item.',
+  'SUBMIT first sends id <item> to check your inventory.',
+  'If the item is missing, no changes are made.',
+  'If found, commands such as ostring sword short "..."',
+  'are sent for filled fields only, using the Item Name.',
+  '',
+  '@YCREATE A TRIVIA PORTAL (TRIVIA PORTAL ON)@w',
+  'Item Name is locked to trivia; it cannot be edited/pasted.',
+  'Fill descriptions, keywords, Owner and Area Name.',
+  'Portal keywords automatically start with trivia portal;',
+  'duplicate trivia/portal words are removed and text lowercased.',
+  'SUBMIT checks the area with zstat before creating the portal.',
+  'Invalid areas or noportals/epic flags stop creation.',
+  'On success, the editor loads the portal, sets its fields',
+  'and destination, identifies it, and keeps it.',
+  '',
+  '@YCLEAR AND TROUBLESHOOTING@w',
+  'CLEAR empties fields and cancels pending checks, but keeps',
+  'the Trivia Portal setting (and trivia as its locked name).',
+  'If an inventory check never completes, use CLEAR to reset.',
+  'Drag the title bar to move the editor; X hides it.',
+  'This help window can be scrolled and resized.',
+}
+
+function HelpClick(flags, hotspot)
+  -- ThemedTextWindow comes from the supplied Aardwolf themed_miniwindows.lua.
+  if not ThemedTextWindow then
+    local ok, err = pcall(require, 'themed_miniwindows')
+    if not ok then
+      ColourNote('red', '', 'TP Editor: Cannot load themed_miniwindows.lua for help: ' .. tostring(err))
+      return
+    end
+  end
+  if not help_window or WindowInfo(help_win, 1) == nil then
+    help_window = ThemedTextWindow(
+      help_win, 90, 65, 610, 460, 'Description Editor - Help', 'left',
+      true, true, true, true, true, false, true,
+      'Arial', 11, 'Consolas', 10, 300, 8, true
+    )
+    for _, line in ipairs(help_lines) do
+      help_window:add_text(line, false)
+    end
+    help_window:set_scroll(1)
+  end
+  help_window:show()
+  help_window:bring_to_front()
 end
 
 function TriviaToggle(flags, hotspot)
@@ -485,7 +565,13 @@ function OnPluginInstall()
   ShowTPEdit()
   ColourNote('lightgreen', '', 'Description Editor loaded. Use tpedit show / tpedit hide.')
 end
-function OnPluginClose() pending_restring = nil; clear_pending(); HideTPEdit() end
-function OnPluginDisable() pending_restring = nil; clear_pending(); HideTPEdit() end
+function OnPluginClose()
+  pending_restring = nil; clear_pending(); HideTPEdit()
+  if help_window and WindowInfo(help_win, 1) ~= nil then help_window:delete() end
+end
+function OnPluginDisable()
+  pending_restring = nil; clear_pending(); HideTPEdit()
+  if help_window and WindowInfo(help_win, 1) ~= nil then help_window:delete() end
+end
 ]]></script>
 </muclient>
